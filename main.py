@@ -27,6 +27,14 @@ class PolyGrid(object):
             self.open(input_file)
 
     def new_blank_grid(self, rows, columns = None):
+        """ Initialize a new, blank grid
+
+        Args:
+            rows: The number of rows in the grid
+            columns: The number of columns in the grid, defaults to the number
+                of rows if not provided
+        """
+
         self.shapes = []
 
         self.bounds = None
@@ -124,8 +132,8 @@ class PolyGrid(object):
         longitude, latitude pair
 
         Args:
-            x: The x coordinate of the grid cell
-            y: The y coordinate of the grid cell
+            x: The column of the grid cell
+            y: The row of the grid cell
 
         Returns:
             A tuple containing the longitude and latitude equivalents of the
@@ -141,8 +149,8 @@ class PolyGrid(object):
         """ Fill in a single cell of the grid
 
         Args:
-            x: The x coordinate of the grid cell
-            y: The y coordinate of the grid cell
+            x: The column of the grid cell
+            y: The row of the grid cell
         """
 
         southwest = self.to_world(x, y)
@@ -154,7 +162,7 @@ class PolyGrid(object):
 
         for shape_index in range(len(self.shapes)):
             if (self.shapes[shape_index]["geometry"].intersects(cell_poly)):
-                self.grid[x][y].append(shape_index)
+                self.grid[y][x].append(shape_index)
 
     def recompute(self):
         """ Recompute the extents of all shapes
@@ -218,7 +226,7 @@ class PolyGrid(object):
         grid_coords = self.to_grid(lon, lat)
 
         try:
-            cell = self.grid[grid_coords[0]][grid_coords[1]]
+            cell = self.grid[grid_coords[1]][grid_coords[0]]
             if (len(cell) == 1):
                 return self.shapes[cell[0]]
             elif (len(cell) == 0):
