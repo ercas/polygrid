@@ -6,7 +6,7 @@ import math
 import shapely.geometry
 import sys
 
-FILE_FORMAT_VERSION = 0.1
+FILE_FORMAT_VERSION = 0.2
 
 class PolyGrid(object):
 
@@ -63,25 +63,37 @@ class PolyGrid(object):
         """
 
         with open(input_file, "r") as f:
-            data = json.load(f)
+            header = f.readline()
 
-        assert data["version"] == FILE_FORMAT_VERSION, "incompatible file"
+            data = json.loads(header)
+            assert data["version"] == FILE_FORMAT_VERSION, "incompatible file"
 
-        self.shapes = [
-            {
-                "geoid": shape["geoid"],
-                "geometry": shapely.geometry.shape(shape["geometry"])
-            }
-            for shape in data["shapes"]
-        ]
+            self.shapes = [
+                {
+                    "geoid": shape["geoid"],
+                    "geometry": shapely.geometry.shape(shape["geometry"])
+                }
+                for shape in data["shapes"]
+            ]
 
-        self.bounds = data["bounds"]
-        self.lon_range = self.bounds[2] - self.bounds[0]
-        self.lat_range = self.bounds[3] - self.bounds[1]
+            self.bounds = data["bounds"]
+            self.lon_range = self.bounds[2] - self.bounds[0]
+            self.lat_range = self.bounds[3] - self.bounds[1]
 
-        self.grid = data["grid"]
-        self.columns = len(self.grid[0])
-        self.rows = len(self.grid)
+            self.grid = []
+            for row in f:
+                row_list = []
+                for cell in row.split(" "):
+                    try:
+                        row_list.append([
+                            int(i)
+                            for i in cell.split(",")
+                        ])
+                    except ValueError:
+                        row_list.append([])
+                self.grid.append(row_list)
+            self.columns = len(self.grid[0])
+            self.rows = len(self.grid)
 
     def save(self, output_file):
         """ Save a PolyGrid to a file
@@ -91,7 +103,7 @@ class PolyGrid(object):
         """
 
         with open(output_file, "w") as f:
-            json.dump(
+            f.write("%s\n" % json.dumps(
                 {
                     "version": FILE_FORMAT_VERSION,
                     "shapes": [
@@ -101,11 +113,19 @@ class PolyGrid(object):
                         }
                         for shape in self.shapes
                     ],
-                    "bounds": self.bounds,
-                    "grid": self.grid
-                },
-                f
-            )
+                    "bounds": self.bounds
+                }
+            ))
+            for row in self.grid:
+                f.write("%s\n" %
+                    " ".join([
+                        ",".join([
+                            str(i)
+                            for i in cell
+                        ])
+                        for cell in row
+                    ])
+                )
 
         print("wrote to %s" % output_file)
 
@@ -246,7 +266,7 @@ class PolyGrid(object):
             pass
 
 if (__name__ == "__main__"):
-    grid = PolyGrid(80)
+    grid = PolyGrid(100)
     grid.add_shapes("./ma_blockgroups.geojson")
     grid.recompute()
-    grid.save("out.json")
+    grid.save("out.polygrid")
