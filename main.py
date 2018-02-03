@@ -3,10 +3,30 @@
 import fiona
 import json
 import math
+import multiprocessing
+import msgpack
+import os
 import shapely.geometry
 import sys
 
 FILE_FORMAT_VERSION = 0.2
+THREADS = multiprocessing.cpu_count()
+ROW_TEMPFILE_TEMPLATE = "polygrid_row_%d.msgpack"
+
+def compute_row_mp(args):
+    (polygrid, y) = args
+
+    print("computing row %d (pid: %d)" % (
+        y, multiprocessing.current_process().pid
+    ))
+
+    row = [[]] * polygrid.columns
+
+    for x in range(polygrid.columns):
+        row[x] = polygrid.compute_cell(x, y)
+
+    with open(ROW_TEMPFILE_TEMPLATE % y, "wb") as f:
+        msgpack.dump(row, f)
 
 class PolyGrid(object):
 
@@ -62,12 +82,13 @@ class PolyGrid(object):
             input_file: The file to load the PolyGrid from
         """
 
-        with open(input_file, "r") as f:
+        with open(input_file, "rb") as f:
             header = f.readline()
 
-            data = json.loads(header)
+            data = json.loads(header.decode())
             assert data["version"] == FILE_FORMAT_VERSION, "incompatible file"
 
+            print("loading shapes")
             self.shapes = [
                 {
                     "geoid": shape["geoid"],
@@ -75,23 +96,29 @@ class PolyGrid(object):
                 }
                 for shape in data["shapes"]
             ]
-
             self.bounds = data["bounds"]
             self.lon_range = self.bounds[2] - self.bounds[0]
             self.lat_range = self.bounds[3] - self.bounds[1]
 
+            """
             self.grid = []
             for row in f:
                 row_list = []
                 for cell in row.split(" "):
                     try:
-                        row_list.append([
+                        row_list.append(msgpack.dumps(
+                            [
                             int(i)
                             for i in cell.split(",")
-                        ])
+                            ]
+                        ))
                     except ValueError:
                         row_list.append([])
                 self.grid.append(row_list)
+            """
+
+            print("loading grid")
+            self.grid = msgpack.load(f)
             self.columns = len(self.grid[0])
             self.rows = len(self.grid)
 
@@ -102,20 +129,29 @@ class PolyGrid(object):
             output_file: The file to save the PolyGrid to
         """
 
-        with open(output_file, "w") as f:
-            f.write("%s\n" % json.dumps(
-                {
-                    "version": FILE_FORMAT_VERSION,
-                    "shapes": [
+        with open(output_file, "wb") as f:
+            f.write(
+                bytes(
+                    "%s\n" % json.dumps(
                         {
-                            "geoid": shape["geoid"],
-                            "geometry": shapely.geometry.mapping(shape["geometry"])
+                            "version": FILE_FORMAT_VERSION,
+                            "shapes": [
+                                {
+                                    "geoid": shape["geoid"],
+                                    "geometry": shapely.geometry.mapping(
+                                        shape["geometry"]
+                                    )
+                                }
+                                for shape in self.shapes
+                            ],
+                            "bounds": self.bounds
                         }
-                        for shape in self.shapes
-                    ],
-                    "bounds": self.bounds
-                }
-            ))
+                    ),
+                    "utf-8"
+                )
+            )
+            msgpack.dump(self.grid, f)
+            """
             for row in self.grid:
                 f.write("%s\n" %
                     " ".join([
@@ -126,6 +162,7 @@ class PolyGrid(object):
                         for cell in row
                     ])
                 )
+            """
 
         print("wrote to %s" % output_file)
 
@@ -171,6 +208,9 @@ class PolyGrid(object):
         Args:
             x: The column of the grid cell
             y: The row of the grid cell
+
+        Returns:
+            The contents of the cell at that position
         """
 
         southwest = self.to_world(x, y)
@@ -180,12 +220,29 @@ class PolyGrid(object):
             southwest[0], southwest[1], northeast[0], northeast[1]
         )
 
+        cell = []
         for shape_index in range(len(self.shapes)):
             if (self.shapes[shape_index]["geometry"].intersects(cell_poly)):
-                self.grid[y][x].append(shape_index)
+                cell.append(shape_index)
+
+        #return cell
+        return msgpack.dumps(cell)
+
+    def compute_row(self, y):
+        """ Fill in a single row of the grid
+
+        Args:
+            y: The row of the grid cell
+        """
+
+        print("computing row %d (pid: %d)" % (
+            y, multiprocessing.current_process().pid
+        ))
+        for x in range(self.columns):
+            self.grid[y][x] = self.compute_cell(x, y)
 
     def recompute(self):
-        """ Recompute the extents of all shapes
+        """ Recompute the extents of all shapes and the polygrid
 
         This function must be run when shapes are added so that lookup
         functions reflect the current state of the PolyGrid.
@@ -206,24 +263,26 @@ class PolyGrid(object):
         print("recomputed bounds for %d shapes" % len(self.shapes))
 
         ## grid cell intersection recomputation ################################
-        self.grid = [
-            [
-                []
-                for x in range(self.columns)
-            ]
-            for y in range(self.rows)
-        ]
+        self.grid = [[]] * self.rows
+        #self.grid = [[ [[]] * self.columns ]] * self.rows
 
-        i = 0
-        n = self.rows * self.columns
-        for x in range(self.columns):
-            for y in range(self.rows):
-                self.compute_cell(x, y)
+        pool = multiprocessing.Pool(THREADS)
+        pool.map(
+            compute_row_mp,
+            zip(
+                [self] * self.rows,
+                range(self.rows)
+            )
+        )
+        pool.close()
+        pool.join()
 
-                i += 1
-                sys.stdout.write("\rcomputed cell %d/%d (%0.2f%%)" % (i, n, i/n*100))
-                sys.stdout.flush()
-        print("")
+        print("merging rows")
+        for y in range(self.rows):
+            row_path = ROW_TEMPFILE_TEMPLATE % y
+            with open(row_path, "rb") as f:
+                self.grid[y] = msgpack.load(f)
+            os.remove(row_path)
 
     def add_shapes(self, filename):
         """ Add shapes to the grid
@@ -233,6 +292,7 @@ class PolyGrid(object):
                 containing shapes supported by the fiona library
         """
 
+        i = 0
         with fiona.drivers(), fiona.open(filename) as src:
             for shape in src:
                 shape["geometry"] = shapely.geometry.shape(shape.pop("geometry"))
@@ -240,33 +300,29 @@ class PolyGrid(object):
                 del shape["id"]
                 del shape["type"]
                 self.shapes.append(shape)
+
+                i += 1
+                sys.stdout.write("\rloaded shape %d" % i)
+                sys.stdout.flush()
             print("added %d shapes" % len(src))
 
     def lookup(self, lon, lat):
         grid_coords = self.to_grid(lon, lat)
 
         try:
-            cell = self.grid[grid_coords[1]][grid_coords[0]]
+            #cell = self.grid[grid_coords[1]][grid_coords[0]]
+            cell = msgpack.loads(self.grid[grid_coords[1]][grid_coords[0]])
             if (len(cell) == 1):
-                return self.shapes[cell[0]]
+                return self.shapes[cell[0]]["geoid"]
             elif (len(cell) == 0):
                 return None
             else:
                 point = shapely.geometry.Point(lon, lat)
-                #results = []
 
                 for shape_index in cell:
                     shape = self.shapes[shape_index]
                     if (shape["geometry"].contains(point)):
                         return shape["geoid"]
-                        #results.append(shape["geoid"])
 
-                #return results
         except IndexError:
             pass
-
-if (__name__ == "__main__"):
-    grid = PolyGrid(100)
-    grid.add_shapes("./ma_blockgroups.geojson")
-    grid.recompute()
-    grid.save("out.polygrid")
